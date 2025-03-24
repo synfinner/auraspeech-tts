@@ -1,0 +1,149 @@
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #f5f5f5;
+}
+
+.container {
+  width: 300px;
+  padding: 20px;
+}
+
+h1 {
+  font-size: 18px;
+  margin-bottom: 20px;
+  color: #333;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 500;
+  color: #555;
+}
+
+input[type="password"],
+select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+input[type="range"] {
+  width: 80%;
+  vertical-align: middle;
+}
+
+#speedValue {
+  display: inline-block;
+  width: 15%;
+  text-align: right;
+  font-weight: 500;
+}
+
+button {
+  background-color: #4285f4;
+  color: white;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  width: 100%;
+}
+
+button:hover {
+  background-color: #3367d6;
+}
+
+.status {
+  margin-top: 15px;
+  padding: 8px;
+  border-radius: 4px;
+  text-align: center;
+  display: none;
+}
+
+.status.success {
+  background-color: #d4edda;
+  color: #155724;
+  display: block;
+}
+
+.status.error {
+  background-color: #f8d7da;
+  color: #721c24;
+  display: block;
+}
+
+.section-title {
+  font-weight: 600;
+  margin: 20px 0 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid #ddd;
+  color: #4285f4;
+}
+
+.keyboard-shortcuts {
+  background-color: #e8f0fe;
+  padding: 10px;
+  border-radius: 4px;
+  margin-bottom: 15px;
+  font-size: 0.9em;
+}
+
+.shortcut-title {
+  font-weight: 600;
+  margin-bottom: 5px;
+  color: #4285f4;
+}
+
+.shortcut-item {
+  margin: 5px 0;
+}
+
+/* High contrast mode styles */
+body.high-contrast {
+  background-color: #000;
+  color: #fff;
+}
+
+body.high-contrast .container {
+  background-color: #000;
+}
+
+body.high-contrast h1,
+body.high-contrast label,
+body.high-contrast .section-title,
+body.high-contrast .shortcut-title {
+  color: #fff;
+}
+
+body.high-contrast input[type="password"],
+body.high-contrast select,
+body.high-contrast input[type="range"] {
+  background-color: #333;
+  color: #fff;
+  border-color: #666;
+}
+
+body.high-contrast .keyboard-shortcuts {
+  background-color: #333;
+  color: #fff;
+}
+
+body.high-contrast button {
+  background-color: #ffab00;
+  color: #000;
+}
+
+body.high-contrast button:hover {
+  background-color: #ffc400;
+}
