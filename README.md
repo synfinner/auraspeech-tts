@@ -85,16 +85,6 @@ openai-tts-extension/
 - Chrome Extension API
 - OpenAI Text-to-Speech API
 
-## Security Considerations
-
-- Your API key is stored securely in Chrome's storage sync API
-- The extension only requests necessary permissions
-- API key is masked in the UI after entry
-
-## License
-
-This project is available for personal and educational use.
-
 ## Acknowledgements
 
 - OpenAI for providing the Text-to-Speech API
