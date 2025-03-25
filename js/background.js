@@ -213,7 +213,7 @@ async function processTextToSpeech(selectedText, tabId) {
         console.log("Using voice:", voice);
         
         // Apply accessibility settings to the request
-        let instructions = "Accent/Affect: Warm, refined, and gently instructive, reminiscent of a friendly professor or podcast host.\n\nTone: Calm, encouraging, and articulate, clearly describing each step with patience.\n\nPacing: fast and deliberate, pausing to allow the listener to follow instructions comfortably. \n\nEmotion: Cheerful, supportive, and pleasantly enthusiastic; convey genuine enjoyment and appreciation of art.\n\nPronunciation: Clearly articulates terminology with gentle emphasis.\n\nPersonality Affect: Friendly and approachable with a hint of sophistication; speak confidently and reassuringly, guiding users through each content patiently and warmly.";
+        let instructions = "Accent/Affect: Warm, refined, and gently instructive, reminiscent of a friendly professor or podcast host.\n\nTone: Calm, encouraging, and articulate\n\nPacing: fast and deliberate, pausing to allow the listener to follow instructions comfortably. \n\nEmotion: Cheerful, supportive, and pleasantly enthusiastic; convey genuine enjoyment and appreciation of art.\n\nPronunciation: Clearly articulates terminology with gentle emphasis.\n\nPersonality Affect: Friendly and approachable with a hint of sophistication; speak confidently and reassuringly, guiding users through each content warmly and professionally.";
         
         if (settings.accessibilitySettings) {
           // Auto-detect language if enabled
@@ -335,44 +335,76 @@ async function processTextToSpeech(selectedText, tabId) {
   }
 }
 
-// More compatible approach to create offscreen document
+// More robust offscreen document handling
 async function createOffscreenDocumentIfNeeded() {
   if (hasOffscreenDocument) {
-    console.log("Offscreen document already exists");
-    return;
+    console.log("Offscreen document already exists (according to flag)");
+    
+    // Double-check if the document actually exists
+    try {
+      const response = await chrome.runtime.sendMessage({
+        target: 'offscreen',
+        action: 'ping'
+      }).catch(() => null);
+      
+      if (response && response.pong) {
+        console.log("Confirmed offscreen document exists");
+        return;
+      } else {
+        console.log("Offscreen document flag was true but document not responding");
+        hasOffscreenDocument = false;
+      }
+    } catch (error) {
+      console.log("Offscreen document check failed, will recreate", error);
+      hasOffscreenDocument = false;
+    }
   }
 
-  // Check if offscreen document exists using a more compatible approach
+  console.log("Creating new offscreen document");
+  
+  // Check if there's an existing document that needs closing first
   try {
-    // Try to send a message to the offscreen document
-    // If it doesn't exist, this will throw an error
-    await chrome.runtime.sendMessage({
-      target: 'offscreen',
-      action: 'ping'
-    }).catch(() => {
-      // Expected error if document doesn't exist
-      throw new Error('Offscreen document does not exist');
+    const existingDocuments = await chrome.offscreen.getContexts();
+    if (existingDocuments && existingDocuments.length > 0) {
+      console.log("Found existing offscreen documents, closing them first");
+      await chrome.offscreen.closeDocument();
+    }
+  } catch (error) {
+    console.log("Error checking existing contexts:", error);
+    // Continue anyway to try creating a new document
+  }
+  
+  // Create the offscreen document
+  try {
+    await chrome.offscreen.createDocument({
+      url: 'html/offscreen.html',
+      reasons: ['AUDIO_PLAYBACK'],
+      justification: 'Play TTS audio'
     });
     
-    // If we get here, the document exists
-    hasOffscreenDocument = true;
-    console.log("Offscreen document exists");
-  } catch (error) {
-    console.log("Creating new offscreen document");
+    // Wait briefly to ensure document is fully loaded
+    await new Promise(resolve => setTimeout(resolve, 300));
     
-    // Create the offscreen document
+    // Verify the document was created successfully
     try {
-      await chrome.offscreen.createDocument({
-        url: 'html/offscreen.html',
-        reasons: ['AUDIO_PLAYBACK'],
-        justification: 'Play TTS audio'
+      const response = await chrome.runtime.sendMessage({
+        target: 'offscreen',
+        action: 'ping'
       });
-      hasOffscreenDocument = true;
-      console.log("Created offscreen document for audio playback");
-    } catch (createError) {
-      console.error("Error creating offscreen document:", createError);
-      throw createError;
+      
+      if (response && response.pong) {
+        console.log("Offscreen document created and verified");
+        hasOffscreenDocument = true;
+      } else {
+        throw new Error("Offscreen document created but not responding to ping");
+      }
+    } catch (pingError) {
+      console.error("Failed to verify offscreen document:", pingError);
+      throw new Error("Failed to verify offscreen document is working properly");
     }
+  } catch (createError) {
+    console.error("Error creating offscreen document:", createError);
+    throw createError;
   }
 }
 
