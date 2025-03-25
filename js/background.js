@@ -376,7 +376,7 @@ async function createOffscreenDocumentIfNeeded() {
   }
 }
 
-// Listen for messages from content script
+// Listen for messages from content script - update the message handler
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("Background script received message:", message, "from tab:", sender.tab?.id);
   
@@ -438,21 +438,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
       case "updatePlaybackSpeed":
         console.log("Received request to update playback speed to:", message.speed);
-        if (hasOffscreenDocument) {
-          console.log("Forwarding speed change to offscreen document");
-          chrome.runtime.sendMessage({
-            target: 'offscreen',
-            action: 'setPlaybackRate',
-            speed: message.speed
-          }).then(() => {
-            console.log("Speed change request sent successfully");
-          }).catch(error => {
-            console.error("Error sending speed change request:", error);
+        // Store the new speed setting but don't try to change active playback
+        chrome.storage.local.get(['accessibilitySettings'], (result) => {
+          const accessibilitySettings = result.accessibilitySettings || {};
+          accessibilitySettings.speed = message.speed;
+          
+          chrome.storage.local.set({ accessibilitySettings }, () => {
+            console.log("Speed setting saved:", message.speed);
+            sendResponse({ 
+              success: true, 
+              message: "Speed setting saved. Will apply to next playback." 
+            });
           });
-        } else {
-          console.warn("No offscreen document available for speed change");
-        }
-        sendResponse({ success: true });
+        });
         break;
         
       default:
@@ -607,7 +605,7 @@ async function playAudioInOffscreenDocument(audioData) {
     await createOffscreenDocumentIfNeeded();  // Use the correct function name
   }
   
-  // Send audio data to offscreen document (no speed needed)
+  // Send audio data to offscreen document (no speed parameter)
   return chrome.runtime.sendMessage({
     target: 'offscreen',
     action: 'playAudio',

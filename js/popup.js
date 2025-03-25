@@ -207,6 +207,28 @@ document.addEventListener('DOMContentLoaded', () => {
   speedInput.addEventListener('input', () => {
     const speed = parseFloat(speedInput.value);
     speedValueSpan.textContent = speed;
+    
+    // Update the note to indicate that speed changes apply to the next playback
+    if (!document.getElementById('speedNote')) {
+      const speedNote = document.createElement('div');
+      speedNote.id = 'speedNote';
+      speedNote.textContent = 'Speed changes apply to next playback';
+      speedNote.style.cssText = `
+        font-size: 11px;
+        color: #666;
+        font-style: italic;
+        margin-top: 5px;
+      `;
+      speedInput.parentElement.appendChild(speedNote);
+      
+      // Remove the note after 3 seconds
+      setTimeout(() => {
+        if (document.getElementById('speedNote')) {
+          document.getElementById('speedNote').remove();
+        }
+      }, 3000);
+    }
+    
     chrome.storage.local.get('accessibilitySettings', (result) => {
       const settings = result.accessibilitySettings || {};
       settings.speed = speed;

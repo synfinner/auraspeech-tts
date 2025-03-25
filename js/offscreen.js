@@ -1,7 +1,6 @@
 // Audio playback variables
 let audioContext = null;
 let audioSource = null;
-let originalAudioBuffer = null; // Store the original buffer for pitch-correct playback
 
 // Initialize audio context
 function initializeAudioContext() {
@@ -30,7 +29,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
       
     case 'playAudio':
-      playAudio(message.audioData); // No longer needs speed parameter
+      playAudio(message.audioData);
       sendResponse({ success: true });
       break;
       
@@ -48,17 +47,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       stopAudio();
       sendResponse({ success: true });
       break;
-
-    case 'setPlaybackRate':
-      setPlaybackRate(message.speed);
-      sendResponse({ success: true });
-      break;
   }
   
   return true; // Keep the message channel open for async response
 });
 
-// Play audio from array buffer - now without speed manipulation
+// Play audio from array buffer - simplified without speed manipulation
 function playAudio(audioDataArray) {
   console.log("Playing audio, buffer size:", audioDataArray.length);
   
@@ -155,24 +149,6 @@ function stopAudio() {
     }
   } catch (error) {
     console.error("Error stopping audio:", error);
-  }
-}
-
-// Function to change playback speed of ongoing playback
-function setPlaybackRate(speed) {
-  // Stop current playback and restart with new speed
-  if (audioSource && originalAudioBuffer) {
-    const currentTime = audioSource.context.currentTime - audioSource.startTime || 0;
-    
-    // Stop the current playback
-    stopAudio();
-    
-    // Start new playback with the adjusted speed
-    startPlaybackWithSpeed(speed);
-    
-    console.log("Updated playback speed to:", speed);
-  } else {
-    console.warn("Cannot adjust playback speed - no active audio source");
   }
 }
 
