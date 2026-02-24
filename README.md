@@ -2,6 +2,8 @@
 
 AuraSpeech is a Manifest V3 browser extension that turns highlighted text or full articles into listenable audio using OpenAI text-to-speech.
 
+![](repo_images/floating_player.png)
+
 ## What is new
 
 - Modernized MV3 architecture (service worker + offscreen audio document)
