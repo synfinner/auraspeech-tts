@@ -1,26 +1,28 @@
 {
   "manifest_version": 3,
   "name": "AuraSpeech",
-  "version": "1.0.0",
-  "description": "Accessibility enhancement tool that converts selected text to speech using OpenAI's TTS API",
+  "version": "2.0.0",
+  "description": "Listen to selections and full web articles with OpenAI text-to-speech.",
   "permissions": [
-    "contextMenus",
-    "storage",
-    "scripting",
     "activeTab",
+    "contextMenus",
     "offscreen",
-    "notifications"
+    "storage"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://api.openai.com/*"
   ],
   "background": {
     "service_worker": "js/background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["js/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "js/content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

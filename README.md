@@ -1,91 +1,67 @@
-# AuraSpeech TTS - Chrome Extension
+# AuraSpeech
 
-AuraSpeech is an accessibility-focused Chrome extension that converts selected text on websites to speech using OpenAI's Text-to-Speech API. It helps users listen to website content, making the web more accessible.
+AuraSpeech is a Manifest V3 browser extension that turns highlighted text or full articles into listenable audio using OpenAI text-to-speech.
 
-## Features
+## What is new
 
-- Convert selected text to speech with a simple right-click
-- Choose from multiple voice options
-- Auto-detect language of selected text
-- Word count validation to control API costs
+- Modernized MV3 architecture (service worker + offscreen audio document)
+- Settings-focused popup for voice, speed, style, and API key management
+- Compact in-page floating player (bottom-right) with pause/resume/stop and collapse
+- Floating in-page player is enabled by default
+- Article extraction heuristics for podcast-style listening mode
+- Chapter-aware article playback with jump controls
+- Bookmark save/resume for long-form sessions
+- Automatic temporary chunk-audio caching to avoid regenerating already-heard portions
+- In-player timeline seeking for currently playing chunk (normal audio-player style)
+- Chunked speech generation for long content while honoring API limits
 
-## Security Considerations
+## OpenAI usage
 
-- The API Key is currently stored locally--and unencrypted--in Chrome's local storage
+AuraSpeech calls `POST https://api.openai.com/v1/audio/speech` with `gpt-4o-mini-tts-2025-12-15`.
 
-## Current Issues
+Current request constraints used by the extension:
 
-- The gpt-4o-mini-tts seems to not handle the `speed` parameter yet, unlike other tts models. Or I just don't know enough yet. I'm working on it.
+- Input is chunked to stay below the API per-request text limit (4096 chars)
+- Chunk compaction merges undersized neighboring chunks to reduce call count
+- Duplicate long paragraphs are deduplicated before chunking to avoid resend bloat
+- Default built-in narration instructions are not re-sent on every chunk unless customized
+- Speed is clamped to `0.25` to `4.0`
+- Voice options include current built-in voices (for example `marin`, `cedar`, `alloy`, `nova`)
+- In-flight speech requests are aborted when playback is stopped
+- 429/5xx responses are retried with backoff
+- SSE streaming is used when available, with automatic MP3 fallback
+- Adaptive delivery mode:
+  - First chunk uses SSE for first-audio latency
+  - Stable long chunks can switch to batch MP3 mode for throughput
+  - Chunk sizing adapts based on observed latency/error signals
+- Previously generated chunk audio is reused automatically (within cache budget) when navigating back
+- Pipeline states are exposed to UI (`extracting` -> `generating` -> `buffering` -> `playing`)
+- Session caps limit total API speech calls per listening session
 
-## Other Considerations
+## Install
 
-- Please keep in mind that processing TTS can become quite expensive. Be mindful of how much text you're sending to the API. Monitor your usage carefully.
-- This extension is very early-stage and may contain bugs. Use at your own risk.
-
-## Installation Instructions
-
-### Prerequisites
-
-- Google Chrome-based browser
-- OpenAI API key (sign up at https://platform.openai.com if you don't have one)
-
-### Installation Steps
-
-1. Download the extension files or clone this repository
-2. Open Chrome and navigate to `chrome://extensions/`
-3. Enable "Developer mode" by toggling the switch in the top-right corner
-4. Click "Load unpacked" and select the `auraspeech-tts` folder
-5. The AuraSpeech extension icon should appear in your Chrome toolbar
-
-## Setup
-
-1. Click on the AuraSpeech icon in your Chrome toolbar
-2. Enter your OpenAI API key in the settings popup
-3. Choose your preferred voice and accessibility options
-4. Click "Save Settings"
+1. Open `chrome://extensions/`
+2. Enable Developer mode
+3. Click **Load unpacked** and choose this folder
+4. Open AuraSpeech popup and save your OpenAI API key
 
 ## Usage
 
-### Basic Usage
+### Speak selected text
 
-1. Select text on any webpage
-2. Right-click on the selected text
-3. Choose "Speak Selected Text" from the context menu
-4. Listen to the text being read aloud
+1. Highlight text on any page
+2. Right-click and choose **AuraSpeech: Speak Selection**
 
-### Word Count Limit
+### Listen to a full article
 
-To control API costs, AuraSpeech will display a warning if you try to convert more than 2000 words to speech at once.
+1. Open an article page
+2. Use the in-page AuraSpeech player to **Detect article**
+3. Start playback with **Listen article**
 
-## Development
+## Notes
 
-### Project Structure
-
-```
-openai-tts-extension/
-├── css/
-│   └── popup.css
-├── html/
-│   └── popup.html
-├── images/
-│   ├── icon16.png
-│   ├── icon48.png
-│   └── icon128.png
-├── js/
-│   ├── accessibility.js
-│   ├── background.js
-│   ├── content.js
-│   └── popup.js
-└── manifest.json
-```
-
-### Technologies Used
-
-- JavaScript
-- Chrome Extension API
-- OpenAI Text-to-Speech API
-
-## Acknowledgements
-
-- OpenAI for providing the Text-to-Speech API
-- Chrome Extension documentation and community
+- API keys are stored in `chrome.storage.local` under a dedicated key, with storage access restricted to trusted extension contexts
+- Legacy plaintext keys in old fields are auto-migrated and removed
+- For strict production security/compliance, use a server-side relay so end users never handle raw provider API keys
+- Long pages can be expensive; AuraSpeech enforces a per-session API-call ceiling
+- Some protected pages (for example browser internal pages) do not allow content scripts

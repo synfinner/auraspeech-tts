@@ -1,162 +1,658 @@
-// Audio playback variables
-let audioContext = null;
-let audioSource = null;
+let currentAudio = null;
+let currentUrl = "";
+let mediaSource = null;
+let sourceBuffer = null;
+let appendQueue = [];
+let streamFinalized = false;
+let suppressEndedEvent = false;
+let streamError = null;
+let activePlaybackId = 0;
+let lastProgressSentAt = 0;
+let lastProgressSentTime = -1;
+let progressTimer = null;
 
-// Initialize audio context
-function initializeAudioContext() {
-  try {
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      console.log("AudioContext initialized in offscreen document");
-    }
-  } catch (error) {
-    console.error("Error initializing AudioContext in offscreen document:", error);
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.target !== "offscreen") {
+    return false;
   }
+
+  void (async () => {
+    try {
+      switch (message.action) {
+        case "playAudio":
+          await playAudio(
+            message.audioData,
+            message.mimeType || "audio/mpeg",
+            message.playbackId,
+            message.speed
+          );
+          sendResponse({ ok: true });
+          break;
+
+        case "ping":
+          sendResponse({ ok: true });
+          break;
+
+        case "startAudioStream":
+          await startAudioStream(
+            message.mimeType || "audio/mpeg",
+            message.playbackId,
+            message.speed
+          );
+          sendResponse({ ok: true });
+          break;
+
+        case "appendAudioChunk":
+          appendAudioChunk(message.audioData, message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "finalizeAudioStream":
+          finalizeAudioStream(message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "abortAudioStream":
+          abortAudioStream(message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "pauseAudio":
+          pauseAudio(message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "resumeAudio":
+          await resumeAudio(message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "stopAudio":
+          stopAudio(message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "setPlaybackRate":
+          setPlaybackRate(message.speed, message.playbackId);
+          sendResponse({ ok: true });
+          break;
+
+        case "getAudioPosition":
+          sendResponse(getAudioPosition(message.playbackId));
+          break;
+
+        case "seekRelativeAudio":
+          sendResponse(seekRelativeAudio(message.deltaSeconds, message.playbackId));
+          break;
+
+        case "seekToAudioTime":
+          sendResponse(seekToAudioTime(message.seconds, message.playbackId));
+          break;
+
+        default:
+          sendResponse({ ok: false, error: "Unknown offscreen action." });
+      }
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message || "Offscreen playback error." });
+    }
+  })();
+
+  return true;
+});
+
+async function playAudio(audioData, mimeType, playbackId, speed) {
+  stopAudio();
+  activePlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+
+  const bytes = new Uint8Array(audioData);
+  const blob = new Blob([bytes], { type: mimeType });
+  currentUrl = URL.createObjectURL(blob);
+
+  currentAudio = createAudioElement();
+  startProgressTimer();
+  setPlaybackRate(speed, activePlaybackId);
+  currentAudio.src = currentUrl;
+  resetProgressTracking();
+
+  await safePlay(currentAudio);
 }
 
-// Handle messages from the background script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.target !== 'offscreen') {
+async function startAudioStream(mimeType, playbackId, speed) {
+  stopAudio();
+  activePlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+
+  currentAudio = createAudioElement();
+  startProgressTimer();
+
+  mediaSource = new MediaSource();
+  appendQueue = [];
+  streamFinalized = false;
+  streamError = null;
+
+  currentUrl = URL.createObjectURL(mediaSource);
+  currentAudio.src = currentUrl;
+  resetProgressTracking();
+
+  await waitForSourceOpen(mediaSource);
+
+  const streamMimeType = resolveStreamMimeType(mimeType);
+
+  if (!streamMimeType) {
+    throw new Error(`Streaming mime type is not supported: ${mimeType}`);
+  }
+
+  sourceBuffer = mediaSource.addSourceBuffer(streamMimeType);
+  sourceBuffer.mode = "sequence";
+  sourceBuffer.addEventListener("updateend", handleSourceBufferUpdateEnd);
+  setPlaybackRate(speed, activePlaybackId);
+  // Do not block stream startup on play(); chunks arrive right after this call returns.
+  void safePlay(currentAudio).catch((error) => {
+    void chrome.runtime.sendMessage({
+      action: "audioError",
+      playbackId: activePlaybackId,
+      error: error.message || "Browser audio playback failed to start."
+    });
+  });
+}
+
+function appendAudioChunk(audioData, playbackId) {
+  if (isStalePlayback(playbackId)) {
     return;
   }
-  
-  console.log("Offscreen document received message:", message.action);
-  
-  switch (message.action) {
-    case 'ping':
-      console.log("Received ping in offscreen document");
-      sendResponse({ pong: true });
-      break;
-      
-    case 'playAudio':
-      playAudio(message.audioData);
-      sendResponse({ success: true });
-      break;
-      
-    case 'pauseAudio':
-      pauseAudio();
-      sendResponse({ success: true });
-      break;
-      
-    case 'resumeAudio':
-      resumeAudio();
-      sendResponse({ success: true });
-      break;
-      
-    case 'stopAudio':
-      stopAudio();
-      sendResponse({ success: true });
-      break;
+
+  throwIfStreamError();
+
+  if (!sourceBuffer || !mediaSource) {
+    throw new Error("Audio stream is not active.");
   }
-  
-  return true; // Keep the message channel open for async response
-});
 
-// Play audio from array buffer - simplified without speed manipulation
-function playAudio(audioDataArray) {
-  console.log("Playing audio, buffer size:", audioDataArray.length);
-  
-  try {
-    initializeAudioContext();
-    stopAudio(); // Stop currently playing audio if needed
+  const bytes = new Uint8Array(audioData);
+  appendQueue.push(bytes);
+  pumpAppendQueue();
 
-    // Convert array back to ArrayBuffer
-    const audioData = new Uint8Array(audioDataArray).buffer;
-    
-    // Decode audio
-    audioContext.decodeAudioData(audioData, (buffer) => {
-      console.log("Audio decoded successfully, duration:", buffer.duration);
-      
-      // Create a new audio source
-      audioSource = audioContext.createBufferSource();
-      audioSource.buffer = buffer;
-      
-      // Connect the source to the audio destination (speakers)
-      audioSource.connect(audioContext.destination);
-      
-      // Start playback
-      if (audioContext.state !== "running") {
-        audioContext.resume().then(() => {
-          audioSource.start(0);
-        }).catch(err => {
-          console.error("Failed to resume AudioContext:", err);
-        });
-      } else {
-        audioSource.start(0);
+  if (currentAudio?.paused) {
+    void safePlay(currentAudio).catch((error) => {
+      if (isPlayInterruptionError(error)) {
+        return;
       }
-      
-      // When audio ends, notify the background script
-      audioSource.onended = () => {
-        console.log("Audio playback ended");
-        audioSource = null;
-        chrome.runtime.sendMessage({ action: "audioEnded" });
-      };
-    }, (error) => {
-      console.error("Error decoding audio data:", error);
+
+      void chrome.runtime.sendMessage({
+        action: "audioError",
+        playbackId: activePlaybackId,
+        error: error.message || "Browser audio playback failed."
+      });
     });
-  } catch (error) {
-    console.error("Error playing audio:", error);
+  }
+
+  throwIfStreamError();
+}
+
+function finalizeAudioStream(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
+  }
+
+  throwIfStreamError();
+  streamFinalized = true;
+  pumpAppendQueue();
+  throwIfStreamError();
+}
+
+function abortAudioStream(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
+  }
+
+  stopAudio(playbackId);
+}
+
+function pauseAudio(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
+  }
+
+  if (currentAudio && !currentAudio.paused) {
+    currentAudio.pause();
   }
 }
 
-// Pause audio playback
-function pauseAudio() {
-  console.log("Pausing audio");
-  try {
-    if (audioContext && audioContext.state === "running") {
-      audioContext.suspend();
-      console.log("Audio paused");
-    }
-  } catch (error) {
-    console.error("Error pausing audio:", error);
+async function resumeAudio(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
+  }
+
+  if (currentAudio && currentAudio.paused) {
+    await safePlay(currentAudio);
   }
 }
 
-// Resume audio playback
-function resumeAudio() {
-  console.log("Resuming audio");
-  try {
-    if (audioContext && audioContext.state === "suspended") {
-      audioContext.resume();
-      console.log("Audio resumed");
-    }
-  } catch (error) {
-    console.error("Error resuming audio:", error);
+function stopAudio(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
   }
+
+  suppressEndedEvent = true;
+
+  if (sourceBuffer) {
+    sourceBuffer.removeEventListener("updateend", handleSourceBufferUpdateEnd);
+  }
+
+  sourceBuffer = null;
+  appendQueue = [];
+  streamFinalized = false;
+  streamError = null;
+
+  if (mediaSource) {
+    try {
+      if (mediaSource.readyState === "open") {
+        mediaSource.endOfStream();
+      }
+    } catch (_error) {
+      // no-op
+    }
+  }
+
+  mediaSource = null;
+
+  if (currentAudio) {
+    currentAudio.onended = null;
+    currentAudio.onerror = null;
+    currentAudio.ontimeupdate = null;
+    currentAudio.onseeked = null;
+    currentAudio.onloadedmetadata = null;
+    currentAudio.onplaying = null;
+    currentAudio.pause();
+    currentAudio.src = "";
+    currentAudio = null;
+  }
+
+  cleanupAudioUrl();
+  activePlaybackId = 0;
+  resetProgressTracking();
+  stopProgressTimer();
+
+  // Re-enable ended notifications for the next playback session.
+  suppressEndedEvent = false;
 }
 
-// Stop audio playback
-function stopAudio() {
-  console.log("Stopping audio");
-  try {
-    // Stop the audio source if it exists
-    if (audioSource) {
-      audioSource.stop();
-      audioSource.disconnect();
-      audioSource = null;
-      console.log("Audio source stopped and disconnected");
+function setPlaybackRate(speed, playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return;
+  }
+
+  if (!currentAudio) {
+    return;
+  }
+
+  const nextRate = clampRate(speed);
+  currentAudio.playbackRate = nextRate;
+  currentAudio.defaultPlaybackRate = nextRate;
+}
+
+function createAudioElement() {
+  const audio = new Audio();
+
+  audio.onplaying = () => {
+    if (suppressEndedEvent) {
+      return;
     }
-    
-    // Optionally close and recreate the audio context
-    if (audioContext) {
-      audioContext.close().then(() => {
-        console.log("AudioContext closed");
-        audioContext = new AudioContext();
-        console.log("New AudioContext created");
-      }).catch(error => {
-        console.error("Error closing AudioContext:", error);
+
+    emitAudioProgress(true);
+
+    void chrome.runtime.sendMessage({
+      action: "audioPlaying",
+      playbackId: activePlaybackId
+    });
+  };
+
+  audio.onended = () => {
+    if (suppressEndedEvent) {
+      return;
+    }
+
+    cleanupAudioUrl();
+    void chrome.runtime.sendMessage({ action: "audioEnded", playbackId: activePlaybackId });
+  };
+
+  audio.ontimeupdate = () => {
+    emitAudioProgress(false);
+  };
+
+  audio.onloadedmetadata = () => {
+    emitAudioProgress(true);
+  };
+
+  audio.onseeked = () => {
+    emitAudioProgress(true);
+  };
+
+  audio.onerror = () => {
+    if (suppressEndedEvent) {
+      return;
+    }
+
+    cleanupAudioUrl();
+    void chrome.runtime.sendMessage({
+      action: "audioError",
+      playbackId: activePlaybackId,
+      error: "Browser audio playback failed."
+    });
+  };
+
+  return audio;
+}
+
+function getAudioPosition(playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return { ok: false, error: "stale playback id" };
+  }
+
+  if (!currentAudio) {
+    return { ok: true, currentTime: 0, duration: 0, paused: true };
+  }
+
+  return {
+    ok: true,
+    currentTime: Number(currentAudio.currentTime || 0),
+    duration: getSeekUpperBound(currentAudio),
+    paused: Boolean(currentAudio.paused)
+  };
+}
+
+function seekRelativeAudio(deltaSeconds, playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return { ok: false, error: "stale playback id" };
+  }
+
+  if (!currentAudio) {
+    return { ok: false, error: "No active audio instance." };
+  }
+
+  const delta = Number.parseFloat(deltaSeconds);
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: "Invalid seek delta." };
+  }
+
+  const current = Number(currentAudio.currentTime || 0);
+  const upperBound = getSeekUpperBound(currentAudio);
+
+  let target = Math.max(0, current + delta);
+  if (Number.isFinite(upperBound)) {
+    target = Math.min(upperBound, target);
+  }
+
+  try {
+    currentAudio.currentTime = target;
+  } catch (error) {
+    return { ok: false, error: error?.message || "Seek failed." };
+  }
+
+  const actual = Number(currentAudio.currentTime || target);
+  const movedSeconds = actual - current;
+  const epsilon = 0.05;
+  const hitLowerBoundary = delta < 0 && actual <= epsilon;
+  const hitUpperBoundary =
+    delta > 0 &&
+    Number.isFinite(upperBound) &&
+    actual >= Math.max(0, upperBound - epsilon);
+  const hitBoundary = hitLowerBoundary || hitUpperBoundary;
+
+  return {
+    ok: true,
+    currentTime: actual,
+    duration: upperBound,
+    movedSeconds,
+    requestedSeconds: delta,
+    hitBoundary
+  };
+}
+
+function seekToAudioTime(seconds, playbackId) {
+  if (isStalePlayback(playbackId)) {
+    return { ok: false, error: "stale playback id" };
+  }
+
+  if (!currentAudio) {
+    return { ok: false, error: "No active audio instance." };
+  }
+
+  const input = Number.parseFloat(seconds);
+  if (!Number.isFinite(input)) {
+    return { ok: false, error: "Invalid seek time." };
+  }
+
+  const duration = getSeekUpperBound(currentAudio);
+  let target = Math.max(0, input);
+  if (Number.isFinite(duration)) {
+    target = Math.min(duration, target);
+  }
+
+  try {
+    currentAudio.currentTime = target;
+  } catch (error) {
+    return { ok: false, error: error?.message || "Seek failed." };
+  }
+
+  emitAudioProgress(true);
+
+  return {
+    ok: true,
+    currentTime: Number(currentAudio.currentTime || target),
+    duration,
+    hitBoundary: Number.isFinite(duration)
+      ? target <= 0 || target >= Math.max(0, duration - 0.05)
+      : target <= 0
+  };
+}
+
+function resetProgressTracking() {
+  lastProgressSentAt = 0;
+  lastProgressSentTime = -1;
+}
+
+function emitAudioProgress(force) {
+  if (!currentAudio || suppressEndedEvent) {
+    return;
+  }
+
+  const now = Date.now();
+  const currentTime = Number(currentAudio.currentTime || 0);
+  const duration = getSeekUpperBound(currentAudio);
+
+  if (!force) {
+    if (now - lastProgressSentAt < 250 && Math.abs(currentTime - lastProgressSentTime) < 0.2) {
+      return;
+    }
+  }
+
+  lastProgressSentAt = now;
+  lastProgressSentTime = currentTime;
+
+  void chrome.runtime.sendMessage({
+    action: "audioProgress",
+    playbackId: activePlaybackId,
+    currentTime,
+    duration
+  });
+}
+
+function getSeekUpperBound(audio) {
+  if (!audio) {
+    return 0;
+  }
+
+  const byDuration =
+    Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+  const bySeekable =
+    audio.seekable && audio.seekable.length > 0
+      ? audio.seekable.end(audio.seekable.length - 1)
+      : null;
+  const byBuffered =
+    audio.buffered && audio.buffered.length > 0
+      ? audio.buffered.end(audio.buffered.length - 1)
+      : null;
+  const byCurrentTime = Number(audio.currentTime || 0);
+
+  if (Number.isFinite(byDuration)) {
+    return byDuration;
+  }
+
+  if (Number.isFinite(bySeekable)) {
+    return bySeekable;
+  }
+
+  if (Number.isFinite(byBuffered)) {
+    return byBuffered;
+  }
+
+  return byCurrentTime > 0 ? byCurrentTime : 0;
+}
+
+function startProgressTimer() {
+  stopProgressTimer();
+  progressTimer = setInterval(() => {
+    emitAudioProgress(false);
+  }, 500);
+}
+
+function stopProgressTimer() {
+  if (!progressTimer) {
+    return;
+  }
+
+  clearInterval(progressTimer);
+  progressTimer = null;
+}
+
+function handleSourceBufferUpdateEnd() {
+  pumpAppendQueue();
+}
+
+function pumpAppendQueue() {
+  if (!sourceBuffer || !mediaSource) {
+    return;
+  }
+
+  if (streamError) {
+    return;
+  }
+
+  if (sourceBuffer.updating) {
+    return;
+  }
+
+  if (appendQueue.length > 0) {
+    const nextChunk = appendQueue.shift();
+    try {
+      sourceBuffer.appendBuffer(nextChunk);
+    } catch (error) {
+      streamError = new Error(
+        `Unable to append audio stream chunk: ${error.message || "Unknown error."}`
+      );
+      void chrome.runtime.sendMessage({
+        action: "audioError",
+        playbackId: activePlaybackId,
+        error: streamError.message
       });
     }
-  } catch (error) {
-    console.error("Error stopping audio:", error);
+    return;
+  }
+
+  if (streamFinalized && mediaSource.readyState === "open") {
+    try {
+      mediaSource.endOfStream();
+    } catch (_error) {
+      // no-op
+    }
   }
 }
 
-// Initialize when the document loads
-document.addEventListener('DOMContentLoaded', () => {
-  console.log("Offscreen document loaded");
-  // Initialize audio context on load
-  initializeAudioContext();
-});
+function resolveStreamMimeType(mimeType) {
+  const candidates = [mimeType, 'audio/mpeg; codecs="mp3"', "audio/mpeg"];
+  return candidates.find((candidate) => MediaSource.isTypeSupported(candidate)) || "";
+}
 
-console.log("Offscreen document script loaded");
+function throwIfStreamError() {
+  if (streamError) {
+    throw streamError;
+  }
+}
+
+async function safePlay(audio) {
+  if (!audio) {
+    return;
+  }
+
+  try {
+    await audio.play();
+  } catch (error) {
+    if (isPlayInterruptionError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function clampRate(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.min(4, Math.max(0.25, parsed));
+}
+
+function normalizePlaybackId(value, fallbackValue) {
+  return Number.isInteger(value) ? value : fallbackValue;
+}
+
+function isStalePlayback(playbackId) {
+  return Number.isInteger(playbackId) && activePlaybackId !== 0 && playbackId !== activePlaybackId;
+}
+
+function isPlayInterruptionError(error) {
+  if (!error) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  const msg = String(error.message || "").toLowerCase();
+  return (
+    msg.includes("interrupted") ||
+    msg.includes("pause()") ||
+    msg.includes("new load request")
+  );
+}
+
+function waitForSourceOpen(targetMediaSource) {
+  return new Promise((resolve, reject) => {
+    const handleOpen = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Failed to open MediaSource."));
+    };
+
+    const cleanup = () => {
+      targetMediaSource.removeEventListener("sourceopen", handleOpen);
+      targetMediaSource.removeEventListener("error", handleError);
+    };
+
+    targetMediaSource.addEventListener("sourceopen", handleOpen);
+    targetMediaSource.addEventListener("error", handleError);
+  });
+}
+
+function cleanupAudioUrl() {
+  if (currentUrl) {
+    URL.revokeObjectURL(currentUrl);
+    currentUrl = "";
+  }
+}
