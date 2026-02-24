@@ -917,7 +917,7 @@
         border: 1px solid rgba(148, 163, 184, 0.36);
         background: linear-gradient(160deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.92) 100%);
         color: #e6edf8;
-        border-radius: 999px;
+        border-radius: 12px;
         padding: 10px 14px;
         font-size: 12px;
         font-weight: 650;
@@ -935,7 +935,7 @@
       .auraspeech-card {
         width: min(92vw, 360px);
         border: 1px solid rgba(148, 163, 184, 0.28);
-        border-radius: 18px;
+        border-radius: 14px;
         background:
           radial-gradient(90% 120% at 100% -20%, rgba(56, 189, 248, 0.18) 0%, rgba(56, 189, 248, 0) 60%),
           linear-gradient(160deg, rgba(15, 23, 42, 0.96) 0%, rgba(20, 33, 49, 0.95) 100%);
@@ -978,7 +978,7 @@
         border: 1px solid rgba(148, 163, 184, 0.34);
         background: rgba(30, 41, 59, 0.8);
         color: #f8fafc;
-        border-radius: 9px;
+        border-radius: 7px;
         padding: 7px 10px;
         min-height: 34px;
         font-size: 12px;
@@ -1031,7 +1031,7 @@
       .auraspeech-chip {
         display: inline-flex;
         align-items: center;
-        border-radius: 999px;
+        border-radius: 8px;
         padding: 4px 9px;
         font-size: 10px;
         letter-spacing: 0.04em;
@@ -1114,7 +1114,7 @@
 
       .auraspeech-advanced {
         border: 1px solid rgba(148, 163, 184, 0.2);
-        border-radius: 12px;
+        border-radius: 9px;
         background: rgba(15, 23, 42, 0.35);
         overflow: hidden;
       }
@@ -1144,7 +1144,7 @@
         border: 1px solid rgba(148, 163, 184, 0.32);
         background: rgba(30, 41, 59, 0.84);
         color: #e2e8f0;
-        border-radius: 10px;
+        border-radius: 8px;
         padding: 10px;
         font-size: 12px;
         min-height: 44px;
@@ -1152,7 +1152,7 @@
 
       .auraspeech-btn {
         border: none;
-        border-radius: 12px;
+        border-radius: 9px;
         min-height: 44px;
         padding: 10px;
         font-size: 12px;
@@ -1230,7 +1230,7 @@
         max-width: 320px;
         background: #0f172a;
         color: #f8fafc;
-        border-radius: 10px;
+        border-radius: 8px;
         border: 1px solid #1e293b;
         padding: 10px 12px;
         font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

@@ -12,6 +12,14 @@ document.addEventListener("DOMContentLoaded", () => {
     saveSettings: document.getElementById("saveSettings"),
     status: document.getElementById("status")
   };
+  const missingUiKeys = Object.entries(ui)
+    .filter(([, element]) => !(element instanceof HTMLElement))
+    .map(([key]) => key);
+
+  if (missingUiKeys.length) {
+    console.error("AuraSpeech popup failed to initialize. Missing UI elements:", missingUiKeys);
+    return;
+  }
 
   let statusTimer = null;
   let hasSavedApiKey = false;
