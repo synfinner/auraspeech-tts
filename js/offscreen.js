@@ -10,6 +10,7 @@ let activePlaybackId = 0;
 let lastProgressSentAt = 0;
 let lastProgressSentTime = -1;
 let progressTimer = null;
+const SOURCE_OPEN_TIMEOUT_MS = 5000;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== "offscreen") {
@@ -102,15 +103,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function playAudio(audioData, mimeType, playbackId, speed) {
   stopAudio();
-  activePlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+  const nextPlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+  activePlaybackId = nextPlaybackId;
 
   const bytes = new Uint8Array(audioData);
   const blob = new Blob([bytes], { type: mimeType });
   currentUrl = URL.createObjectURL(blob);
 
-  currentAudio = createAudioElement();
+  currentAudio = createAudioElement(nextPlaybackId);
   startProgressTimer();
-  setPlaybackRate(speed, activePlaybackId);
+  setPlaybackRate(speed, nextPlaybackId);
   currentAudio.src = currentUrl;
   resetProgressTracking();
 
@@ -119,21 +121,26 @@ async function playAudio(audioData, mimeType, playbackId, speed) {
 
 async function startAudioStream(mimeType, playbackId, speed) {
   stopAudio();
-  activePlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+  const nextPlaybackId = normalizePlaybackId(playbackId, activePlaybackId + 1);
+  activePlaybackId = nextPlaybackId;
 
-  currentAudio = createAudioElement();
+  currentAudio = createAudioElement(nextPlaybackId);
   startProgressTimer();
 
-  mediaSource = new MediaSource();
+  const targetMediaSource = new MediaSource();
+  mediaSource = targetMediaSource;
   appendQueue = [];
   streamFinalized = false;
   streamError = null;
 
-  currentUrl = URL.createObjectURL(mediaSource);
+  currentUrl = URL.createObjectURL(targetMediaSource);
   currentAudio.src = currentUrl;
   resetProgressTracking();
 
-  await waitForSourceOpen(mediaSource);
+  await waitForSourceOpen(targetMediaSource);
+  if (isStalePlayback(nextPlaybackId) || mediaSource !== targetMediaSource || !currentAudio) {
+    return;
+  }
 
   const streamMimeType = resolveStreamMimeType(mimeType);
 
@@ -141,15 +148,19 @@ async function startAudioStream(mimeType, playbackId, speed) {
     throw new Error(`Streaming mime type is not supported: ${mimeType}`);
   }
 
-  sourceBuffer = mediaSource.addSourceBuffer(streamMimeType);
+  sourceBuffer = targetMediaSource.addSourceBuffer(streamMimeType);
   sourceBuffer.mode = "sequence";
   sourceBuffer.addEventListener("updateend", handleSourceBufferUpdateEnd);
-  setPlaybackRate(speed, activePlaybackId);
+  setPlaybackRate(speed, nextPlaybackId);
   // Do not block stream startup on play(); chunks arrive right after this call returns.
   void safePlay(currentAudio).catch((error) => {
+    if (isStalePlayback(nextPlaybackId)) {
+      return;
+    }
+
     void chrome.runtime.sendMessage({
       action: "audioError",
-      playbackId: activePlaybackId,
+      playbackId: nextPlaybackId,
       error: error.message || "Browser audio playback failed to start."
     });
   });
@@ -176,9 +187,13 @@ function appendAudioChunk(audioData, playbackId) {
         return;
       }
 
+      if (isStalePlayback(playbackId)) {
+        return;
+      }
+
       void chrome.runtime.sendMessage({
         action: "audioError",
-        playbackId: activePlaybackId,
+        playbackId,
         error: error.message || "Browser audio playback failed."
       });
     });
@@ -289,52 +304,53 @@ function setPlaybackRate(speed, playbackId) {
   currentAudio.defaultPlaybackRate = nextRate;
 }
 
-function createAudioElement() {
+function createAudioElement(playbackId) {
+  const stablePlaybackId = normalizePlaybackId(playbackId, activePlaybackId);
   const audio = new Audio();
 
   audio.onplaying = () => {
-    if (suppressEndedEvent) {
+    if (suppressEndedEvent || isStalePlayback(stablePlaybackId)) {
       return;
     }
 
-    emitAudioProgress(true);
+    emitAudioProgress(true, stablePlaybackId);
 
     void chrome.runtime.sendMessage({
       action: "audioPlaying",
-      playbackId: activePlaybackId
+      playbackId: stablePlaybackId
     });
   };
 
   audio.onended = () => {
-    if (suppressEndedEvent) {
+    if (suppressEndedEvent || isStalePlayback(stablePlaybackId)) {
       return;
     }
 
     cleanupAudioUrl();
-    void chrome.runtime.sendMessage({ action: "audioEnded", playbackId: activePlaybackId });
+    void chrome.runtime.sendMessage({ action: "audioEnded", playbackId: stablePlaybackId });
   };
 
   audio.ontimeupdate = () => {
-    emitAudioProgress(false);
+    emitAudioProgress(false, stablePlaybackId);
   };
 
   audio.onloadedmetadata = () => {
-    emitAudioProgress(true);
+    emitAudioProgress(true, stablePlaybackId);
   };
 
   audio.onseeked = () => {
-    emitAudioProgress(true);
+    emitAudioProgress(true, stablePlaybackId);
   };
 
   audio.onerror = () => {
-    if (suppressEndedEvent) {
+    if (suppressEndedEvent || isStalePlayback(stablePlaybackId)) {
       return;
     }
 
     cleanupAudioUrl();
     void chrome.runtime.sendMessage({
       action: "audioError",
-      playbackId: activePlaybackId,
+      playbackId: stablePlaybackId,
       error: "Browser audio playback failed."
     });
   };
@@ -433,7 +449,7 @@ function seekToAudioTime(seconds, playbackId) {
     return { ok: false, error: error?.message || "Seek failed." };
   }
 
-  emitAudioProgress(true);
+  emitAudioProgress(true, playbackId);
 
   return {
     ok: true,
@@ -450,8 +466,8 @@ function resetProgressTracking() {
   lastProgressSentTime = -1;
 }
 
-function emitAudioProgress(force) {
-  if (!currentAudio || suppressEndedEvent) {
+function emitAudioProgress(force, playbackId = activePlaybackId) {
+  if (!currentAudio || suppressEndedEvent || isStalePlayback(playbackId)) {
     return;
   }
 
@@ -470,7 +486,7 @@ function emitAudioProgress(force) {
 
   void chrome.runtime.sendMessage({
     action: "audioProgress",
-    playbackId: activePlaybackId,
+    playbackId,
     currentTime,
     duration
   });
@@ -511,7 +527,7 @@ function getSeekUpperBound(audio) {
 function startProgressTimer() {
   stopProgressTimer();
   progressTimer = setInterval(() => {
-    emitAudioProgress(false);
+    emitAudioProgress(false, activePlaybackId);
   }, 500);
 }
 
@@ -542,6 +558,7 @@ function pumpAppendQueue() {
   }
 
   if (appendQueue.length > 0) {
+    const streamPlaybackId = activePlaybackId;
     const nextChunk = appendQueue.shift();
     try {
       sourceBuffer.appendBuffer(nextChunk);
@@ -549,9 +566,12 @@ function pumpAppendQueue() {
       streamError = new Error(
         `Unable to append audio stream chunk: ${error.message || "Unknown error."}`
       );
+      if (isStalePlayback(streamPlaybackId)) {
+        return;
+      }
       void chrome.runtime.sendMessage({
         action: "audioError",
-        playbackId: activePlaybackId,
+        playbackId: streamPlaybackId,
         error: streamError.message
       });
     }
@@ -630,6 +650,23 @@ function isPlayInterruptionError(error) {
 
 function waitForSourceOpen(targetMediaSource) {
   return new Promise((resolve, reject) => {
+    if (!targetMediaSource) {
+      reject(new Error("MediaSource instance is not available."));
+      return;
+    }
+
+    if (targetMediaSource.readyState === "open") {
+      resolve();
+      return;
+    }
+
+    if (targetMediaSource.readyState === "ended") {
+      reject(new Error("MediaSource is already ended."));
+      return;
+    }
+
+    let timeoutId = null;
+
     const handleOpen = () => {
       cleanup();
       resolve();
@@ -641,12 +678,21 @@ function waitForSourceOpen(targetMediaSource) {
     };
 
     const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
       targetMediaSource.removeEventListener("sourceopen", handleOpen);
       targetMediaSource.removeEventListener("error", handleError);
     };
 
     targetMediaSource.addEventListener("sourceopen", handleOpen);
     targetMediaSource.addEventListener("error", handleError);
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for MediaSource to open."));
+    }, SOURCE_OPEN_TIMEOUT_MS);
   });
 }
 

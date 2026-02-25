@@ -17,6 +17,8 @@ const PLAYBACK_HEARTBEAT_MS = 500;
 const SPEED_STEP = 0.1;
 const BASE_WORDS_PER_MINUTE = 170;
 const BOOKMARKS_STORAGE_KEY = "readingBookmarks";
+const MAX_BOOKMARK_POSITION_SECONDS = 60 * 60 * 4;
+const BOOKMARK_RESUME_SEEK_TIMEOUT_MS = 7000;
 const LOCAL_API_KEY_KEY = "secureApiKey";
 const SESSION_API_KEY_KEY = "apiKey";
 const MAX_CHAPTERS = 80;
@@ -60,6 +62,7 @@ const playbackState = {
 
 let activeFetchController = null;
 let playbackHeartbeatTimer = null;
+let playNextChunkRunId = 0;
 const deliveryPerf = {
   sseSuccessCount: 0,
   sseFailureStreak: 0,
@@ -483,15 +486,29 @@ async function playNextChunk() {
     return;
   }
 
+  const runId = ++playNextChunkRunId;
+  const runPlaybackId = playbackState.playbackId;
+  const isRunCurrent = () =>
+    runId === playNextChunkRunId &&
+    playbackState.playbackId === runPlaybackId &&
+    playbackState.isPlaying;
+  const isRunPlayable = () => isRunCurrent() && !playbackState.isPaused;
   const nextIndex = playbackState.currentIndex + 1;
 
   if (nextIndex >= playbackState.queue.length) {
-    await finishPlayback();
+    if (isRunCurrent()) {
+      await finishPlayback();
+    }
     return;
   }
 
   if (nextIndex > 0) {
     await sleep(INTER_CHUNK_DELAY_MS);
+    if (!isRunPlayable()) {
+      return;
+    }
+  } else if (!isRunPlayable()) {
+    return;
   }
 
   playbackState.currentIndex = nextIndex;
@@ -520,24 +537,27 @@ async function playNextChunk() {
       currentChapterIndex
     });
 
-    if (!playbackState.isPlaying || playbackState.isPaused) {
+    if (!isRunPlayable()) {
       return;
     }
 
     try {
       await ensureOffscreenDocument();
-      if (!playbackState.isPlaying || playbackState.isPaused) {
+      if (!isRunPlayable()) {
         return;
       }
       await sendRuntimeMessageChecked({
         target: "offscreen",
         action: "playAudio",
         mimeType: "audio/mpeg",
-        playbackId: playbackState.playbackId,
+        playbackId: runPlaybackId,
         speed: clampNumber(playbackState.settings?.speed || 1, 0.25, 4),
         audioData: Array.from(cachedAudio)
       });
     } catch (error) {
+      if (!isRunCurrent()) {
+        return;
+      }
       await showToast(playbackState.tabId, error.message || "Failed to play cached audio.", "error");
       await stopPlayback({ silent: true });
     }
@@ -569,16 +589,20 @@ async function playNextChunk() {
         currentChunk,
         playbackState.settings,
         undefined,
-        playbackState.playbackId,
+        runPlaybackId,
         nextIndex
       );
     } else {
       audioBytes = await streamSpeechAudio(
         currentChunk,
         playbackState.settings,
-        playbackState.playbackId,
+        runPlaybackId,
         nextIndex
       );
+    }
+
+    if (!isRunCurrent()) {
+      return;
     }
 
     cacheAudioChunk(nextIndex, audioBytes, { allowReplace: true });
@@ -600,6 +624,10 @@ async function playNextChunk() {
       currentChapterIndex
     });
   } catch (error) {
+    if (!isRunCurrent()) {
+      return;
+    }
+
     playbackState.isGenerating = false;
     broadcastPlaybackState();
 
@@ -611,7 +639,7 @@ async function playNextChunk() {
         await sendRuntimeMessageSafe({
           target: "offscreen",
           action: "abortAudioStream",
-          playbackId: playbackState.playbackId
+          playbackId: runPlaybackId
         });
         broadcastPlaybackState();
       }
@@ -696,6 +724,16 @@ async function resumePlayback() {
   });
 
   broadcastPlaybackState();
+
+  const position = await sendRuntimeMessageSafe({
+    target: "offscreen",
+    action: "getAudioPosition",
+    playbackId: playbackState.playbackId
+  });
+  const hasActiveAudio = Boolean(position?.ok) && Number(position?.duration || 0) > 0;
+  if (!hasActiveAudio && playbackState.isPlaying && !playbackState.isPaused) {
+    await playNextChunk();
+  }
 }
 
 async function skipChunk(direction) {
@@ -721,6 +759,7 @@ async function seekToChunk(targetIndex) {
   const clampedIndex = clampInteger(targetIndex, 0, playbackState.queue.length - 1);
   const playbackId = playbackState.playbackId;
 
+  invalidatePlayNextChunkRun();
   abortInFlightRequest();
   await sendRuntimeMessageSafe({
     target: "offscreen",
@@ -826,6 +865,40 @@ async function seekToAudioTime(seconds) {
   };
 }
 
+async function seekToBookmarkPosition(positionSeconds, expectedPlaybackId = playbackState.playbackId) {
+  const targetSeconds = clampNumber(positionSeconds, 0, MAX_BOOKMARK_POSITION_SECONDS);
+  if (
+    !playbackState.isPlaying ||
+    targetSeconds <= 0 ||
+    playbackState.playbackId !== expectedPlaybackId
+  ) {
+    return { ok: false, error: "No bookmark position to seek." };
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= BOOKMARK_RESUME_SEEK_TIMEOUT_MS) {
+    if (!playbackState.isPlaying || playbackState.playbackId !== expectedPlaybackId) {
+      return { ok: false, error: "Playback stopped before bookmark seek completed." };
+    }
+
+    if (!playbackState.isGenerating && !playbackState.pausedDuringGeneration) {
+      const result = await seekToAudioTime(targetSeconds);
+      if (result?.ok) {
+        return result;
+      }
+
+      const errorMessage = String(result?.error || "").toLowerCase();
+      if (!errorMessage.includes("generating")) {
+        return result || { ok: false, error: "Could not seek to bookmark position." };
+      }
+    }
+
+    await sleep(120);
+  }
+
+  return { ok: false, error: "Timed out waiting for bookmark audio to become seekable." };
+}
+
 async function skipToChapter(chapterIndex) {
   if (!playbackState.isPlaying || !playbackState.chapters.length) {
     return;
@@ -852,11 +925,20 @@ async function saveCurrentBookmark(tabId) {
     return null;
   }
 
+  const normalizedUrl = await getTabBookmarkUrl(tabId);
+  if (normalizedUrl) {
+    bookmark.pageUrl = normalizedUrl;
+  }
+
+  const storageKeys = buildBookmarkStorageKeys(tabId, normalizedUrl);
   const stored = await chrome.storage.local.get([BOOKMARKS_STORAGE_KEY]);
   const nextBookmarks = {
-    ...(stored[BOOKMARKS_STORAGE_KEY] || {}),
-    [buildBookmarkStorageKey(tabId)]: bookmark
+    ...(stored[BOOKMARKS_STORAGE_KEY] || {})
   };
+
+  for (const key of storageKeys) {
+    nextBookmarks[key] = bookmark;
+  }
 
   await chrome.storage.local.set({ [BOOKMARKS_STORAGE_KEY]: nextBookmarks });
   return bookmark;
@@ -867,8 +949,49 @@ async function getBookmarkForTab(tabId) {
     return null;
   }
 
+  const normalizedUrl = await getTabBookmarkUrl(tabId);
+  const storageKeys = buildBookmarkStorageKeys(tabId, normalizedUrl);
   const stored = await chrome.storage.local.get([BOOKMARKS_STORAGE_KEY]);
-  return stored[BOOKMARKS_STORAGE_KEY]?.[buildBookmarkStorageKey(tabId)] || null;
+  const allBookmarks = stored[BOOKMARKS_STORAGE_KEY] || {};
+
+  let matchedKey = "";
+  let bookmark = null;
+  for (const key of storageKeys) {
+    const candidate = allBookmarks[key];
+    if (!candidate) {
+      continue;
+    }
+
+    if (normalizedUrl && key === buildBookmarkStorageKey(tabId)) {
+      const candidateUrl = normalizeBookmarkUrl(candidate.pageUrl || "");
+      if (!candidateUrl || candidateUrl !== normalizedUrl) {
+        continue;
+      }
+    }
+
+    matchedKey = key;
+    bookmark = candidate;
+    break;
+  }
+
+  if (!bookmark) {
+    return null;
+  }
+
+  const preferredUrlKey = buildBookmarkUrlStorageKey(normalizedUrl);
+  if (
+    preferredUrlKey &&
+    matchedKey !== preferredUrlKey &&
+    !allBookmarks[preferredUrlKey]
+  ) {
+    allBookmarks[preferredUrlKey] = {
+      ...bookmark,
+      pageUrl: normalizedUrl
+    };
+    await chrome.storage.local.set({ [BOOKMARKS_STORAGE_KEY]: allBookmarks });
+  }
+
+  return bookmark;
 }
 
 async function resumeBookmark(tabId) {
@@ -877,8 +1000,17 @@ async function resumeBookmark(tabId) {
     return { ok: false, error: "No bookmark saved for this tab." };
   }
 
+  const resumePositionSeconds = clampNumber(
+    bookmark.positionSeconds,
+    0,
+    MAX_BOOKMARK_POSITION_SECONDS
+  );
+
   if (playbackState.isPlaying && playbackState.tabId === tabId) {
     await seekToChunk(bookmark.chunkIndex || 0);
+    if (resumePositionSeconds > 0) {
+      await seekToBookmarkPosition(resumePositionSeconds, playbackState.playbackId);
+    }
     return { ok: true, resumed: true, state: getPublicPlaybackState(), bookmark };
   }
 
@@ -905,6 +1037,9 @@ async function resumeBookmark(tabId) {
       chunkIndex: bookmark.chunkIndex
     }
   });
+  if (resumePositionSeconds > 0) {
+    await seekToBookmarkPosition(resumePositionSeconds, playbackState.playbackId);
+  }
 
   return { ok: true, resumed: true, state: getPublicPlaybackState(), bookmark };
 }
@@ -940,6 +1075,7 @@ async function nudgeSpeed(delta) {
 }
 
 async function stopPlayback({ silent }) {
+  invalidatePlayNextChunkRun();
   abortInFlightRequest();
 
   if (playbackState.isPlaying) {
@@ -1007,6 +1143,7 @@ async function finishPlayback() {
   playbackState.pipelineState = "completed";
   playbackState.audioTimeSeconds = playbackState.audioDurationSeconds;
 
+  stopPlaybackHeartbeat();
   broadcastPlaybackState();
 
   await sendTabMessageSafe(tabId, {
@@ -1187,6 +1324,7 @@ async function consumeSpeechSse(response, playbackId, chunkIndex) {
   const startedAt = Date.now();
   let sawTerminalEvent = false;
   const seenEvents = [];
+  let consecutiveReadTimeouts = 0;
 
   const flushAudioBatch = async () => {
     if (!pendingAudioChunks.length) {
@@ -1294,18 +1432,28 @@ async function consumeSpeechSse(response, playbackId, chunkIndex) {
     const readResult = await readWithTimeout(reader, SSE_READ_TIMEOUT_MS);
 
     if (readResult.timedOut) {
+      consecutiveReadTimeouts += 1;
       if (sawTerminalEvent || totalAudioBytes > 0) {
-        await reader.cancel().catch(() => {});
-        break;
+        if (sawTerminalEvent) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+
+        if (consecutiveReadTimeouts < 3) {
+          continue;
+        }
       }
 
+      const stallPhase =
+        totalAudioBytes > 0 ? "before stream completion" : "before audio arrived";
       throw new Error(
-        `Speech SSE stream stalled before audio arrived. Events observed: ${
+        `Speech SSE stream stalled ${stallPhase}. Events observed: ${
           seenEvents.join(", ") || "none"
         }`
       );
     }
 
+    consecutiveReadTimeouts = 0;
     const { value, done } = readResult;
 
     if (done) {
@@ -1852,6 +2000,10 @@ function stopPlaybackHeartbeat() {
   playbackHeartbeatTimer = null;
 }
 
+function invalidatePlayNextChunkRun() {
+  playNextChunkRunId += 1;
+}
+
 async function showToast(tabId, message, kind) {
   if (!tabId) {
     return;
@@ -2322,6 +2474,55 @@ function buildBookmarkStorageKey(tabId) {
   return `tab:${tabId}`;
 }
 
+function buildBookmarkUrlStorageKey(normalizedUrl) {
+  if (!normalizedUrl) {
+    return "";
+  }
+
+  return `url:${normalizedUrl}`;
+}
+
+function buildBookmarkStorageKeys(tabId, normalizedUrl) {
+  const keys = [];
+  const urlKey = buildBookmarkUrlStorageKey(normalizedUrl);
+  if (urlKey) {
+    keys.push(urlKey);
+  }
+
+  if (Number.isInteger(tabId)) {
+    keys.push(buildBookmarkStorageKey(tabId));
+  }
+
+  return keys;
+}
+
+async function getTabBookmarkUrl(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return "";
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return normalizeBookmarkUrl(tab?.url || "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function normalizeBookmarkUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ""));
+    if (!/^https?:$/i.test(parsed.protocol)) {
+      return "";
+    }
+
+    parsed.hash = "";
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
 async function buildBookmark(tabId) {
   if (!playbackState.isPlaying || playbackState.tabId !== tabId || playbackState.currentIndex < 0) {
     return null;
@@ -2336,7 +2537,7 @@ async function buildBookmark(tabId) {
     action: "getAudioPosition",
     playbackId: playbackState.playbackId
   });
-  const positionSeconds = clampNumber(position?.currentTime || 0, 0, 60 * 60 * 4);
+  const positionSeconds = clampNumber(position?.currentTime || 0, 0, MAX_BOOKMARK_POSITION_SECONDS);
 
   return {
     source: playbackState.source,
